@@ -19,7 +19,7 @@ import os
 import sys
 import threading
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import colorchooser, filedialog, messagebox, ttk
 from pathlib import Path
 
 from PIL import Image, ImageSequence, ImageTk
@@ -43,7 +43,7 @@ class LgtmApp:
     def __init__(self, root):
         self.root = root
         self.root.title("GIF → LGTM ジェネレーター")
-        self.root.geometry("480x660")
+        self.root.geometry("480x692")
         self.root.resizable(False, False)
 
         self.selected_file = None
@@ -103,18 +103,27 @@ class LgtmApp:
         self.outline_var = tk.StringVar(value="black")
         tk.Entry(root, textvariable=self.outline_var).place(x=390, y=186, width=70)
 
+        # --- 色をRGBで選ぶボタン ---
+        tk.Button(
+            root, text="文字色をRGBで選択...", command=lambda: self.pick_color(self.color_var)
+        ).place(x=20, y=212, width=210, height=24)
+        tk.Button(
+            root, text="縁色をRGBで選択...", command=lambda: self.pick_color(self.outline_var)
+        ).place(x=250, y=212, width=210, height=24)
+
         # --- 文字位置プレビュー (GIFがそのまま動きます) ---
-        tk.Label(root, text="プレビュー (クリック/ドラッグで文字位置を指定できます):").place(x=20, y=214)
+        preview_y = 246
+        tk.Label(root, text="プレビュー (クリック/ドラッグで文字位置を指定できます):").place(x=20, y=preview_y)
         self.preview_canvas = tk.Canvas(
             root, width=PREVIEW_W, height=PREVIEW_H, bg="#dddddd",
             relief="ridge", borderwidth=2, highlightthickness=0,
         )
-        self.preview_canvas.place(x=(480 - PREVIEW_W) // 2, y=234)
+        self.preview_canvas.place(x=(480 - PREVIEW_W) // 2, y=preview_y + 20)
         self.preview_canvas.bind("<Button-1>", self.on_preview_click)
         self.preview_canvas.bind("<B1-Motion>", self.on_preview_click)
 
         reset_pos_btn = tk.Button(root, text="中央に戻す", command=self.reset_position)
-        reset_pos_btn.place(x=190, y=234 + PREVIEW_H + 8, width=100, height=26)
+        reset_pos_btn.place(x=190, y=preview_y + 20 + PREVIEW_H + 8, width=100, height=26)
 
         # 文字/色を変更したらプレビューにも反映する
         self.text_var.trace_add("write", lambda *_: self.render_frame(self.current_render_index))
@@ -122,7 +131,7 @@ class LgtmApp:
         self.outline_var.trace_add("write", lambda *_: self.render_frame(self.current_render_index))
 
         # --- 表示タイミング ---
-        timing_y = 234 + PREVIEW_H + 8 + 26 + 10
+        timing_y = preview_y + 20 + PREVIEW_H + 8 + 26 + 10
         tk.Label(
             root, text="表示タイミング (スライダーをドラッグすると、その時点の映像で確認できます):"
         ).place(x=20, y=timing_y)
@@ -297,6 +306,15 @@ class LgtmApp:
             except Exception:
                 pass
             self.preview_after_id = None
+
+    def pick_color(self, target_var):
+        initial = target_var.get().strip() or None
+        try:
+            _rgb, hex_color = colorchooser.askcolor(color=initial, title="色を選択 (RGB)")
+        except tk.TclError:
+            _rgb, hex_color = colorchooser.askcolor(title="色を選択 (RGB)")
+        if hex_color:
+            target_var.set(hex_color)
 
     # ----- 文字位置 -----
 
