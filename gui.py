@@ -137,7 +137,6 @@ class LgtmApp:
         self.output_w = None  # 出力サイズ (px)
         self.output_h = None
         self._updating_size = False  # サイズ関連ウィジェットの相互更新ループ防止フラグ
-        self.current_screen = "select"
 
         # --- 画面切り替え用コンテナ ---
         self.container = tk.Frame(root, bg=self.palette["bg"])
@@ -220,17 +219,26 @@ class LgtmApp:
         preview_card.grid(row=0, column=0, sticky="n", padx=(0, 12))
         ttk.Label(preview_card, text="プレビュー", style="CardHeader.TLabel").pack(anchor="w")
         ttk.Label(
-            preview_card, text="クリック/ドラッグで文字位置を指定できます",
-            style="Hint.TLabel",
+            preview_card, text="クリック/ドラッグで文字位置を指定できます\n"
+                                "(出力サイズが表示枠より大きい場合はスクロールできます)",
+            style="Hint.TLabel", justify="left",
         ).pack(anchor="w", pady=(0, 8))
 
-        canvas_wrap = tk.Frame(preview_card, bg=self.palette["card_bg"])
+        # プレビューは実際の出力サイズと同じにするが、ウィンドウ自体のサイズが
+        # 出力サイズの変更で変わらないよう、表示枠は常に固定サイズにしてスクロール可能にする
+        canvas_wrap = ttk.Frame(preview_card, style="Card.TFrame")
         canvas_wrap.pack()
         self.preview_canvas = tk.Canvas(
             canvas_wrap, width=PREVIEW_W, height=PREVIEW_H, bg="#E5E7EB",
             highlightthickness=1, highlightbackground=self.palette["border"],
+            scrollregion=(0, 0, PREVIEW_W, PREVIEW_H),
         )
-        self.preview_canvas.pack()
+        v_scroll = ttk.Scrollbar(canvas_wrap, orient="vertical", command=self.preview_canvas.yview)
+        h_scroll = ttk.Scrollbar(canvas_wrap, orient="horizontal", command=self.preview_canvas.xview)
+        self.preview_canvas.configure(yscrollcommand=v_scroll.set, xscrollcommand=h_scroll.set)
+        self.preview_canvas.grid(row=0, column=0)
+        v_scroll.grid(row=0, column=1, sticky="ns")
+        h_scroll.grid(row=1, column=0, sticky="ew")
         self.preview_canvas.bind("<Button-1>", self.on_preview_click)
         self.preview_canvas.bind("<B1-Motion>", self.on_preview_click)
 
@@ -383,18 +391,12 @@ class LgtmApp:
     # ----- 画面切り替え -----
 
     def show_screen(self, name):
-        self.current_screen = name
         frame = self.select_screen if name == "select" else self.edit_screen
         frame.tkraise()
         self.root.update_idletasks()
         width = frame.winfo_reqwidth()
         height = frame.winfo_reqheight()
         self.root.geometry(f"{width}x{height}")
-
-    def _refresh_window_size(self):
-        """編集画面を表示中に、内容(プレビューサイズなど)が変わった際にウィンドウサイズを再計算する"""
-        if self.current_screen == "edit":
-            self.show_screen("edit")
 
     def go_back(self):
         self.stop_playback()
@@ -462,7 +464,7 @@ class LgtmApp:
         else:
             self.preview_frames = []
             self.preview_offset = None
-            self.preview_canvas.config(width=PREVIEW_W, height=PREVIEW_H)
+            self.preview_canvas.config(scrollregion=(0, 0, PREVIEW_W, PREVIEW_H))
             self.render_frame(None)
 
         self.start_playback()
@@ -472,16 +474,20 @@ class LgtmApp:
 
     def _rebuild_preview_frames(self):
         """raw_frames を現在の出力サイズにリサイズして preview_frames を作り直す。
-        プレビューは常に実際の出力サイズと同じにする。"""
+        プレビューは常に実際の出力サイズと同じにする(表示枠自体は固定サイズのまま、
+        枠より大きい場合はスクロールで確認する)。"""
         if not self.raw_frames:
             self.preview_frames = []
             self.preview_offset = None
+            self.preview_canvas.config(scrollregion=(0, 0, PREVIEW_W, PREVIEW_H))
             return
 
         w, h = self.output_w, self.output_h
         self.preview_frames = [f.resize((w, h), Image.LANCZOS) for f in self.raw_frames]
         self.preview_offset = (0, 0, w, h)
-        self.preview_canvas.config(width=w, height=h)
+        self.preview_canvas.config(scrollregion=(0, 0, w, h))
+        self.preview_canvas.xview_moveto(0)
+        self.preview_canvas.yview_moveto(0)
         idx = self.current_render_index if self.current_render_index is not None else 0
         self.render_frame(idx)
 
@@ -506,8 +512,6 @@ class LgtmApp:
             self._rebuild_preview_frames()
         finally:
             self._updating_size = False
-
-        self._refresh_window_size()
 
     def on_width_entry_change(self, *_args):
         if self._updating_size:
@@ -620,8 +624,11 @@ class LgtmApp:
         if self.preview_offset is None:
             return
         offset_x, offset_y, disp_w, disp_h = self.preview_offset
-        rel_x = (event.x - offset_x) / disp_w
-        rel_y = (event.y - offset_y) / disp_h
+        # スクロールされている場合に備え、ウィジェット座標をキャンバスの論理座標に変換する
+        x = self.preview_canvas.canvasx(event.x)
+        y = self.preview_canvas.canvasy(event.y)
+        rel_x = (x - offset_x) / disp_w
+        rel_y = (y - offset_y) / disp_h
         self.x_ratio = min(max(rel_x, 0.0), 1.0)
         self.y_ratio = min(max(rel_y, 0.0), 1.0)
         self.render_frame(self.current_render_index)
