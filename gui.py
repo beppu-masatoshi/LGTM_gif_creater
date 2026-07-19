@@ -52,6 +52,11 @@ PALETTE = {
 PREVIEW_W = 320
 PREVIEW_H = 180
 
+MIN_OUTPUT_DIM = 10
+MAX_OUTPUT_DIM = 1200
+SCALE_MIN = 10
+SCALE_MAX = 300
+
 
 def _configure_style(root):
     style = ttk.Style(root)
@@ -116,7 +121,8 @@ class LgtmApp:
         _configure_style(root)
 
         self.selected_file = None
-        self.preview_frames = []  # 選択中GIFの全フレーム (プレビューサイズに縮小済み, RGBA)
+        self.raw_frames = []  # 選択中GIFの全フレーム (元の解像度のまま, RGBA)
+        self.preview_frames = []  # 出力サイズにリサイズ済みのフレーム (プレビュー=実際の出力と同じサイズ)
         self.preview_durations = []  # 各フレームの表示時間 (ms)
         self.preview_times = []  # 各フレーム開始時点の累積経過時間 (ms)
         self.preview_photo = None  # ImageTk.PhotoImage への参照保持用
@@ -127,6 +133,11 @@ class LgtmApp:
         self.x_ratio = 0.5
         self.y_ratio = 0.5
         self.total_duration_ms = 0  # 選択中GIFの全フレーム合計再生時間
+        self.original_size = None  # 選択中GIFの元のサイズ (w, h)
+        self.output_w = None  # 出力サイズ (px)
+        self.output_h = None
+        self._updating_size = False  # サイズ関連ウィジェットの相互更新ループ防止フラグ
+        self.current_screen = "select"
 
         # --- 画面切り替え用コンテナ ---
         self.container = tk.Frame(root, bg=self.palette["bg"])
@@ -140,9 +151,10 @@ class LgtmApp:
         self.edit_screen.grid(row=0, column=0, sticky="nsew")
 
         self.render_frame(None)
-        # 両スケールのウィジェットが揃った後でないとcommandコールバックが失敗するため、
-        # 画面構築が完全に終わってから終了スケールの初期値(100%)を設定する
+        # 各スケールのウィジェットが揃った後でないとcommandコールバックが失敗するため、
+        # 画面構築が完全に終わってから初期値を設定する
         self.end_scale.set(100)
+        self.scale_slider.set(100)
         self._sync_timing_labels()
         self.show_screen("select")
 
@@ -226,9 +238,52 @@ class LgtmApp:
             preview_card, text="中央に戻す", style="Small.TButton", command=self.reset_position
         ).pack(pady=(8, 0))
 
-        # --- 右カラム (文字スタイル・表示タイミング) ---
+        # --- 右カラム (出力サイズ・文字スタイル・表示タイミング) ---
         right_col = ttk.Frame(content)
         right_col.grid(row=0, column=1, sticky="nsew")
+
+        # --- 出力サイズカード ---
+        size_card = ttk.Frame(right_col, style="Card.TFrame", padding=12)
+        size_card.pack(fill="x", pady=(0, 12))
+        size_card.columnconfigure(1, weight=1)
+
+        ttk.Label(size_card, text="出力サイズ", style="CardHeader.TLabel").grid(
+            row=0, column=0, columnspan=3, sticky="w", pady=(0, 10)
+        )
+
+        ttk.Label(size_card, text="幅(px):", style="Card.TLabel").grid(
+            row=1, column=0, sticky="w", pady=4
+        )
+        self.width_var = tk.StringVar()
+        ttk.Entry(size_card, textvariable=self.width_var).grid(
+            row=1, column=1, columnspan=2, sticky="ew", pady=4
+        )
+
+        ttk.Label(size_card, text="高さ(px):", style="Card.TLabel").grid(
+            row=2, column=0, sticky="w", pady=4
+        )
+        self.height_var = tk.StringVar()
+        ttk.Entry(size_card, textvariable=self.height_var).grid(
+            row=2, column=1, columnspan=2, sticky="ew", pady=4
+        )
+
+        self.width_var.trace_add("write", self.on_width_entry_change)
+        self.height_var.trace_add("write", self.on_height_entry_change)
+
+        scale_row = ttk.Frame(size_card, style="Card.TFrame")
+        scale_row.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        ttk.Label(scale_row, text="拡大率", style="Card.TLabel", width=6).pack(side="left")
+        self.scale_slider = ttk.Scale(
+            scale_row, from_=SCALE_MIN, to=SCALE_MAX, orient="horizontal",
+            command=self.on_scale_slider_change,
+        )
+        self.scale_slider.pack(side="left", fill="x", expand=True, padx=8)
+        self.scale_label = ttk.Label(scale_row, text="100%", style="Card.TLabel", width=6)
+        self.scale_label.pack(side="left")
+
+        ttk.Button(
+            size_card, text="元のサイズに戻す", style="Small.TButton", command=self.reset_size
+        ).grid(row=4, column=0, columnspan=3, pady=(8, 0))
 
         # --- 文字スタイルカード ---
         style_card = ttk.Frame(right_col, style="Card.TFrame", padding=12)
@@ -328,12 +383,18 @@ class LgtmApp:
     # ----- 画面切り替え -----
 
     def show_screen(self, name):
+        self.current_screen = name
         frame = self.select_screen if name == "select" else self.edit_screen
         frame.tkraise()
         self.root.update_idletasks()
         width = frame.winfo_reqwidth()
         height = frame.winfo_reqheight()
         self.root.geometry(f"{width}x{height}")
+
+    def _refresh_window_size(self):
+        """編集画面を表示中に、内容(プレビューサイズなど)が変わった際にウィンドウサイズを再計算する"""
+        if self.current_screen == "edit":
+            self.show_screen("edit")
 
     def go_back(self):
         self.stop_playback()
@@ -367,40 +428,115 @@ class LgtmApp:
         self.stop_playback()
         try:
             im = Image.open(path)
-            frames, durations, times = [], [], []
-            disp_w = disp_h = offset_x = offset_y = None
+            raw_frames, durations, times = [], [], []
             elapsed = 0
+            orig_size = None
             for frame in ImageSequence.Iterator(im):
                 rgba = frame.convert("RGBA")
-                if disp_w is None:
-                    scale = min(PREVIEW_W / rgba.width, PREVIEW_H / rgba.height)
-                    disp_w = max(1, int(rgba.width * scale))
-                    disp_h = max(1, int(rgba.height * scale))
-                    offset_x = (PREVIEW_W - disp_w) // 2
-                    offset_y = (PREVIEW_H - disp_h) // 2
-                frames.append(rgba.resize((disp_w, disp_h), Image.LANCZOS))
+                if orig_size is None:
+                    orig_size = rgba.size
+                raw_frames.append(rgba)
                 duration = frame.info.get("duration", 100)
                 durations.append(duration)
                 times.append(elapsed)
                 elapsed += duration
 
-            self.preview_frames = frames
+            self.raw_frames = raw_frames
             self.preview_durations = durations
             self.preview_times = times
             self.total_duration_ms = elapsed
-            self.preview_offset = (offset_x, offset_y, disp_w, disp_h)
+            self.original_size = orig_size
         except Exception:
-            self.preview_frames, self.preview_durations, self.preview_times = [], [], []
+            self.raw_frames, self.preview_durations, self.preview_times = [], [], []
             self.total_duration_ms = 0
-            self.preview_offset = None
+            self.original_size = None
 
         self.x_ratio = 0.5
         self.y_ratio = 0.5
         self.start_scale.set(0)
         self.end_scale.set(100)
         self._sync_timing_labels()
+
+        if self.original_size:
+            self._apply_output_size(*self.original_size)
+        else:
+            self.preview_frames = []
+            self.preview_offset = None
+            self.preview_canvas.config(width=PREVIEW_W, height=PREVIEW_H)
+            self.render_frame(None)
+
         self.start_playback()
         self.show_screen("edit")
+
+    # ----- 出力サイズ -----
+
+    def _rebuild_preview_frames(self):
+        """raw_frames を現在の出力サイズにリサイズして preview_frames を作り直す。
+        プレビューは常に実際の出力サイズと同じにする。"""
+        if not self.raw_frames:
+            self.preview_frames = []
+            self.preview_offset = None
+            return
+
+        w, h = self.output_w, self.output_h
+        self.preview_frames = [f.resize((w, h), Image.LANCZOS) for f in self.raw_frames]
+        self.preview_offset = (0, 0, w, h)
+        self.preview_canvas.config(width=w, height=h)
+        idx = self.current_render_index if self.current_render_index is not None else 0
+        self.render_frame(idx)
+
+    def _apply_output_size(self, width, height):
+        if self._updating_size:
+            return
+        self._updating_size = True
+        try:
+            width = max(MIN_OUTPUT_DIM, min(MAX_OUTPUT_DIM, int(round(width))))
+            height = max(MIN_OUTPUT_DIM, min(MAX_OUTPUT_DIM, int(round(height))))
+            self.output_w, self.output_h = width, height
+            self.width_var.set(str(width))
+            self.height_var.set(str(height))
+
+            if self.original_size:
+                ow, oh = self.original_size
+                pct = round(width / ow * 100) if ow else 100
+                pct = max(SCALE_MIN, min(SCALE_MAX, pct))
+                self.scale_slider.set(pct)
+                self.scale_label.config(text=f"{pct}%")
+
+            self._rebuild_preview_frames()
+        finally:
+            self._updating_size = False
+
+        self._refresh_window_size()
+
+    def on_width_entry_change(self, *_args):
+        if self._updating_size:
+            return
+        try:
+            width = int(self.width_var.get())
+        except ValueError:
+            return
+        self._apply_output_size(width, self.output_h or width)
+
+    def on_height_entry_change(self, *_args):
+        if self._updating_size:
+            return
+        try:
+            height = int(self.height_var.get())
+        except ValueError:
+            return
+        self._apply_output_size(self.output_w or height, height)
+
+    def on_scale_slider_change(self, _value=None):
+        if self._updating_size or not self.original_size:
+            return
+        pct = self.scale_slider.get()
+        ow, oh = self.original_size
+        self._apply_output_size(ow * pct / 100, oh * pct / 100)
+
+    def reset_size(self):
+        if self.original_size:
+            self._apply_output_size(*self.original_size)
 
     def render_frame(self, idx):
         """idx番目のフレームを、現在の文字設定と表示タイミング条件を反映してプレビューに描画する"""
@@ -552,6 +688,8 @@ class LgtmApp:
                 self.y_ratio,
                 start_ms,
                 end_ms,
+                self.output_w,
+                self.output_h,
             )
             self.root.after(0, self.on_convert_done, output_path, n, None)
         except Exception as e:
